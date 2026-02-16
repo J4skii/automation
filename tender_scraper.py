@@ -59,13 +59,15 @@ CATEGORIES = {
         "keywords": ["insurance", "broker", "risk management", "underwriting", 
                     "policy", "premium", "claim", "sasria", "fidelity", 
                     "liability", "indemnity", "surety", "bond", "actuarial", 
-                    "loss control", "marine", "aviation", "motor fleet"],
+                    "loss control", "marine", "aviation", "motor fleet",
+                    "short-term", "medical aid", "pension", "provident", "guarantee"],
         "priority": 1
     },
     "advisory_consulting": {
         "keywords": ["advisory", "consultant", "consulting", "risk advisory",
                     "financial advisory", "strategy", "actuarial services",
-                    "management consulting", "business advisory", "feasibility"],
+                    "management consulting", "business advisory", "feasibility",
+                    "audit", "internal audit", "forensic", "governance", "professional services"],
         "priority": 2
     },
     "civil_engineering": {
@@ -696,10 +698,21 @@ class TenderTracker:
         stats = {cat: {'count': 0, 'total_value': 0} for cat in CATEGORIES.keys()}
         stats['uncategorized'] = {'count': 0, 'total_value': 0}
         
-        # Process new tenders in batches
-        if all_new_tenders:
-            if self.sheets.add_tenders(all_new_tenders):
-                for tender in all_new_tenders:
+        # Filter and Process new tenders
+        filtered_tenders = []
+        for tender in all_new_tenders:
+            is_priority = tender.get('priority_buyer', False)
+            is_categorized = tender.get('category') != 'uncategorized'
+            
+            # STRICT FILTERING: Discard if uncategorized AND NOT a priority buyer
+            if not is_categorized and not is_priority:
+                continue
+                
+            filtered_tenders.append(tender)
+
+        if filtered_tenders:
+            if self.sheets.add_tenders(filtered_tenders):
+                for tender in filtered_tenders:
                     # Update stats
                     cat = tender['category']
                     stats[cat]['count'] += 1
@@ -710,12 +723,14 @@ class TenderTracker:
                         self.alerter.send_alert(tender)
                         time.sleep(1)  # Minimal delay for alerts
         
+        logger.info(f"Processed {len(filtered_tenders)} and discarded {len(all_new_tenders) - len(filtered_tenders)} noisy tenders.")
+        
         # Update dashboard
         self.sheets.update_dashboard(stats)
         
         logger.info("=" * 60)
         logger.info("SCRAPER COMPLETED SUCCESSFULLY")
-        logger.info(f"New tenders added: {len(all_new_tenders)}")
+        logger.info(f"New tenders added: {len(filtered_tenders)}")
         logger.info("=" * 60)
 
 # ============== ENTRY POINT ==============
