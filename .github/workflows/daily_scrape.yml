@@ -1,0 +1,42 @@
+name: Daily Tender Scraper
+
+on:
+  schedule:
+    # Run at 08:00 SAST (06:00 UTC)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run scraper
+      env:
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        ETENDERS_USERNAME: ${{ secrets.ETENDERS_USERNAME }}
+        ETENDERS_PASSWORD: ${{ secrets.ETENDERS_PASSWORD }}
+        GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      run: |
+        # Write service account to file
+        echo '${{ secrets.GCP_SERVICE_ACCOUNT }}' > service_account.json
+        python tender_scraper.py
+    
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: scraper-logs
+        path: tender_scraper.log
