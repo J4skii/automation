@@ -53,40 +53,20 @@ ALERT_RECIPIENTS = [
     "josh@praeto.co.za"
 ]
 
-# Categories and Keywords
+# Categories and Keywords - INSURANCE ONLY
 CATEGORIES = {
     "insurance": {
         "keywords": ["insurance", "broker", "risk management", "underwriting", 
                     "policy", "premium", "claim", "sasria", "fidelity", 
                     "liability", "indemnity", "surety", "bond", "actuarial", 
                     "loss control", "marine", "aviation", "motor fleet",
-                    "short-term", "medical aid", "pension", "provident", "guarantee"],
+                    "short-term", "medical aid", "pension", "provident", "guarantee",
+                    "group life", "funeral cover", "professional indemnity", 
+                    "public liability", "employers liability", "property insurance",
+                    "motor insurance", "asset insurance", "business interruption",
+                    "cyber insurance", "directors and officers", "D&O", "surety bond",
+                    "insurance broker", "reinsurance", "loss assessor", "claims handler"],
         "priority": 1
-    },
-    "advisory_consulting": {
-        "keywords": ["advisory", "consultant", "consulting", "risk advisory",
-                    "financial advisory", "strategy", "actuarial services",
-                    "management consulting", "business advisory", "feasibility",
-                    "audit", "internal audit", "forensic", "governance", "professional services"],
-        "priority": 2
-    },
-    "civil_engineering": {
-        "keywords": ["civil engineering", "infrastructure", "roads", "bridges",
-                    "water", "sewer", "stormwater", "earthworks", "structural",
-                    "pavement", "drainage", "bulk services"],
-        "priority": 3
-    },
-    "cleaning_facility": {
-        "keywords": ["cleaning", "facilities", "facility management", "hygiene",
-                    "sanitation", "waste management", "grounds maintenance",
-                    "janitorial", "pest control", "landscaping"],
-        "priority": 4
-    },
-    "construction": {
-        "keywords": ["construction", "building", "renovation", "refurbishment",
-                    "structural", "concrete", "roofing", "painting", "electrical",
-                    "plumbing", "HVAC", "maintenance", "alterations"],
-        "priority": 5
     }
 }
 
@@ -383,117 +363,116 @@ class BaseScraper:
             return 0
 
 class ETendersScraper(BaseScraper):
-    """Scraper for eTenders.gov.za"""
+    """Scraper for eTenders.gov.za using JSON API with GET request"""
     
     def __init__(self, username=None, password=None):
         super().__init__()
         self.base_url = "https://www.etenders.gov.za"
-        self.username = username
-        self.password = password
         
-    def login(self):
-        """Login to eTenders (if credentials provided)"""
-        if not self.username or not self.password:
-            logger.info("No credentials provided, scraping public tenders only")
-            return True
-            
-        try:
-            self._init_selenium()
-            self.driver.get(f"{self.base_url}/Home/Login")
-            
-            # Wait for login form
-            wait = WebDriverWait(self.driver, 10)
-            username_field = wait.until(EC.presence_of_element_located((By.ID, "Username")))
-            password_field = self.driver.find_element(By.ID, "Password")
-            
-            username_field.send_keys(self.username)
-            password_field.send_keys(self.password)
-            
-            # Click login
-            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-            
-            # Wait for dashboard
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "dashboard")))
-            logger.info("Logged in to eTenders successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"eTenders login failed: {e}")
-            return False
-    
     def scrape(self):
-        """Scrape tender opportunities"""
+        """Scrape using DataTables JSON API with insurance category filters"""
         tenders = []
         
+        # Build the full URL with all query parameters (GET request, not POST)
+        params = {
+            'draw': 1,
+            'start': 0,
+            'length': 100,
+            'search[value]': '',
+            'search[regex]': 'false',
+            'category': '41,5,81,83',  # Your insurance categories
+            'department': '',
+            'province': '',
+            'cluster': 'undefined',
+            'type': '',
+            'esubmissions': '',
+            'status': '1',
+            'tenderNumber': '',
+            'company': '',
+            'supplierNumber': ''
+        }
+        
+        # Add column definitions
+        for i in range(7):
+            col_data = ['', 'category', 'description', 'eSubmission', 'date_Published', 'closing_Date', 'actions'][i]
+            params[f'columns[{i}][data]'] = col_data
+            params[f'columns[{i}][name]'] = ''
+            params[f'columns[{i}][searchable]'] = 'true'
+            params[f'columns[{i}][orderable]'] = 'false' if i in [0, 2] else 'true'
+            params[f'columns[{i}][search][value]'] = ''
+            params[f'columns[{i}][search][regex]'] = 'false'
+        
+        params['order[0][column]'] = '5'
+        params['order[0][dir]'] = 'asc'
+        
+        headers = {
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': f'{self.base_url}/Home/opportunities?id=1'
+        }
+        
         try:
-            if not self.driver:
-                self._init_selenium()
-                
-            self.driver.get(f"{self.base_url}/Home/opportunities?id=1")
+            logger.info("Calling eTenders API with insurance categories: 41,5,81,83")
             
-            # Wait for the table to load
-            wait = WebDriverWait(self.driver, 20)
-            wait.until(EC.presence_of_element_located((By.ID, "tendeList")))
+            # USE GET, NOT POST!
+            response = requests.get(
+                f"{self.base_url}/Home/TenderFilter/",
+                params=params,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()
             
-            # Give it a second for rows to render
-            time.sleep(2)
+            data = response.json()
+            records_total = data.get('recordsTotal', 0)
+            records_filtered = data.get('recordsFiltered', 0)
             
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+            logger.info(f"eTenders API: {records_filtered} tenders found")
             
-            # Find tender table/rows
-            # The structure often has rows inside the table id 'tendeList'
-            table = soup.find('table', id='tendeList')
-            if not table:
-                logger.warning("eTenders table 'tendeList' not found in page source")
-                return []
-
-            tender_rows = table.find_all('tr')[1:] # Skip header
-            
-            for row in tender_rows:
+            for item in data.get('data', []):
                 try:
-                    cols = row.find_all('td')
-                    if len(cols) < 5:
-                        continue
+                    closing_raw = item.get('closing_Date', '')
+                    closing_date = closing_raw.split('T')[0] if closing_raw else ''
                     
-                    title = cols[2].get_text(strip=True)
-                    # Skip if it's a dummy row or just says "Loading..."
-                    if "loading" in title.lower() or not title:
+                    website_category = item.get('category', '')
+                    title = item.get('description', '')
+                    our_category = self.categorize_tender(title, website_category)
+                    
+                    # Only keep insurance or priority buyers
+                    if our_category != 'insurance' and not any(pb.lower() in item.get('organ_of_State', '').lower() for pb in PRIORITY_BUYERS):
                         continue
-                        
-                    buyer = cols[1].get_text(strip=True)
-                    closing_date = cols[5].get_text(strip=True)
-                    category = self.categorize_tender(title, "")
                     
                     tender = {
+                        'date_scraped': datetime.now().strftime('%Y-%m-%d'),
                         'source': 'eTenders.gov.za',
-                        'tender_id': f"ET-{datetime.now().year}-{hash(title) % 10000:04d}",
-                        'title': title,
-                        'buyer': buyer,
-                        'category': category,
+                        'tender_id': f"ET-{item.get('id', '')}",
+                        'title': title[:250],
+                        'buyer': item.get('organ_of_State', 'Unknown'),
+                        'category': our_category,
                         'closing_date': closing_date,
                         'days_remaining': self.calculate_days_remaining(closing_date),
                         'value_zar': 0,
                         'description': title,
-                        'document_link': f"{self.base_url}{cols[2].find('a')['href'] if cols[2].find('a') else ''}",
-                        'priority_buyer': any(pb.lower() in buyer.lower() for pb in PRIORITY_BUYERS)
+                        'document_link': f"{self.base_url}/Home/TenderDetails?id={item.get('id', '')}",
+                        'status': 'New',
+                        'priority_buyer': any(pb.lower() in item.get('organ_of_State', '').lower() for pb in PRIORITY_BUYERS),
+                        'alert_sent': False
                     }
                     
                     tenders.append(tender)
                     
                 except Exception as e:
-                    logger.warning(f"Error parsing eTenders row: {e}")
+                    logger.warning(f"Error parsing tender: {e}")
                     continue
-                    
-        except Exception as e:
-            logger.error(f"Error scraping eTenders: {e}")
             
-        finally:
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
-                
-        logger.info(f"Scraped {len(tenders)} tenders from eTenders")
+            logger.info(f"eTenders: Kept {len(tenders)} insurance/priority tenders")
+            
+        except Exception as e:
+            logger.error(f"Error in eTenders scraper: {e}")
+        
         return tenders
+
 
 class EasyTendersScraper(BaseScraper):
     """Scraper for EasyTenders.co.za"""
@@ -509,9 +488,9 @@ class EasyTendersScraper(BaseScraper):
         try:
             # Search for each category keyword
             for category, data in CATEGORIES.items():
-                for keyword in data['keywords'][:5]:  # Top 5 keywords per category
+                for keyword in data['keywords']:  # Use ALL keywords per category
                     try:
-                        search_url = f"{self.base_url}/tenders?search={keyword}"
+                        search_url = f"{self.base_url}/tenders?sort=&search={requests.utils.quote(keyword)}&province=all&company=&industry=any&status=open-tenders&filter=1"
                         response = self.session.get(search_url, timeout=30)
                         soup = BeautifulSoup(response.content, 'html.parser')
                         
@@ -574,6 +553,15 @@ class EasyTendersScraper(BaseScraper):
             logger.error(f"Error scraping EasyTenders: {e}")
             
         logger.info(f"Scraped {len(tenders)} unique tenders from EasyTenders")
+        
+        # Log category breakdown
+        if tenders:
+            category_counts = {}
+            for t in tenders:
+                cat = t.get('category', 'unknown')
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+            logger.info(f"EasyTenders category breakdown: {category_counts}")
+        
         return tenders
 
 class TransnetScraper(BaseScraper):
@@ -695,17 +683,17 @@ class TenderTracker:
         logger.info(f"Found {len(all_new_tenders)} new tenders")
         
         # Process new tenders
-        stats = {cat: {'count': 0, 'total_value': 0} for cat in CATEGORIES.keys()}
-        stats['uncategorized'] = {'count': 0, 'total_value': 0}
+        stats = {'insurance': {'count': 0, 'total_value': 0}}
         
-        # Filter and Process new tenders
+        # Filter and Process new tenders - INSURANCE ONLY
+        # Keep ONLY insurance category tenders
         filtered_tenders = []
         for tender in all_new_tenders:
-            is_priority = tender.get('priority_buyer', False)
-            is_categorized = tender.get('category') != 'uncategorized'
+            is_insurance = tender.get('category') == 'insurance'
             
-            # STRICT FILTERING: Discard if uncategorized AND NOT a priority buyer
-            if not is_categorized and not is_priority:
+            # STRICT FILTERING: Only keep insurance tenders
+            if not is_insurance:
+                logger.debug(f"Discarded non-insurance tender: {tender.get('title', 'unknown')[:50]}")
                 continue
                 
             filtered_tenders.append(tender)
@@ -718,10 +706,10 @@ class TenderTracker:
                     stats[cat]['count'] += 1
                     stats[cat]['total_value'] += tender.get('value_zar', 0)
                     
-                    # Send alert for priority buyers or insurance-related
-                    if tender['priority_buyer'] or tender['category'] == 'insurance':
-                        self.alerter.send_alert(tender)
-                        time.sleep(1)  # Minimal delay for alerts
+                    # All filtered tenders are insurance - send alert for all
+                    # No need to check priority_buyer since we only keep insurance
+                    self.alerter.send_alert(tender)
+                    time.sleep(1)  # Minimal delay for alerts
         
         logger.info(f"Processed {len(filtered_tenders)} and discarded {len(all_new_tenders) - len(filtered_tenders)} noisy tenders.")
         
