@@ -173,6 +173,95 @@ class GoogleSheetsManager:
             logger.error(f"Error getting existing tenders: {e}")
             return set()
     
+    def validate_tender_data(self, tender_data):
+        """Ensure critical fields are properly formatted."""
+        import re
+        errors = []
+        
+        # Check closing_date is ISO format (YYYY-MM-DD)
+        closing = tender_data.get('closing_date', '')
+        if closing and not re.match(r'\d{4}-\d{2}-\d{2}', str(closing)):
+            errors.append(f"Invalid date format: {closing}")
+        
+        # Check days_remaining is integer
+        days = tender_data.get('days_remaining')
+        if days is not None and not isinstance(days, int):
+            try:
+                tender_data['days_remaining'] = int(days)
+            except (ValueError, TypeError):
+                errors.append(f"Invalid days_remaining type: {type(days)}")
+        
+        return errors
+    
+    def auto_fix_tender(self, tender):
+        """Attempt to fix common tender data issues."""
+        import re
+        
+        # Fix closing_date if needed
+        closing = tender.get('closing_date', '')
+        if closing and not re.match(r'\d{4}-\d{2}-\d{2}', str(closing)):
+            # Try to parse and normalize
+            parsed = self._parse_date_flexible(closing)
+            if parsed:
+                tender['closing_date'] = parsed
+                # Recalculate days_remaining
+                from datetime import datetime
+                try:
+                    closing_date = datetime.strptime(parsed, '%Y-%m-%d')
+                    days = (closing_date - datetime.now()).days
+                    tender['days_remaining'] = max(0, days)
+                except:
+                    pass
+        
+        # Ensure days_remaining is integer
+        if tender.get('days_remaining') is not None:
+            try:
+                tender['days_remaining'] = int(tender['days_remaining'])
+            except (ValueError, TypeError):
+                tender['days_remaining'] = 0
+        
+        return tender
+    
+    def _parse_date_flexible(self, date_str):
+        """Try multiple formats to parse date string."""
+        from datetime import datetime
+        
+        if not date_str:
+            return None
+        
+        # Clean the string
+        clean = str(date_str).replace('Closing:', '').strip()
+        
+        formats = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d %B %Y', '%d %b %Y']
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(clean, fmt)
+                return parsed.strftime('%Y-%m-%d')
+            except:
+                continue
+        
+        # Try regex for "18 Mar" format
+        match = re.search(r'(\d{1,2})\s+([A-Za-z]+)', clean)
+        if match:
+            day, month_abbr = match.groups()
+            months = {
+                'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+                'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+            }
+            month_num = months.get(month_abbr.lower()[:3])
+            if month_num:
+                today = datetime.now()
+                year = today.year
+                try:
+                    test_date = datetime(year, int(month_num), int(day))
+                    if test_date < today:
+                        year += 1
+                    return f"{year}-{month_num}-{day.zfill(2)}"
+                except ValueError:
+                    pass
+        
+        return None
+
     def add_tenders(self, tenders_data):
         """Add multiple tenders to Raw_Data sheet in one batch"""
         if not tenders_data:
@@ -183,6 +272,13 @@ class GoogleSheetsManager:
             
             rows = []
             for tender_data in tenders_data:
+                # Validate before adding
+                if errors := self.validate_tender_data(tender_data):
+                    logger.warning(f"Validation errors for {tender_data.get('tender_id')}: {errors}")
+                    # Fix in place
+                    tender_data = self.auto_fix_tender(tender_data)
+                    logger.info(f"Auto-fixed tender: {tender_data.get('tender_id')}")
+                
                 row = [
                     tender_data.get('date_scraped', datetime.now().strftime('%Y-%m-%d')),
                     tender_data.get('source', ''),
@@ -349,8 +445,29 @@ class BaseScraper:
     def calculate_days_remaining(self, closing_date_str):
         """Calculate days until closing"""
         try:
+            # Handle EasyTenders format: "Closing 18 Mar" or "18 Mar"
+            import re
+            match = re.search(r'(\d{1,2})\s+([A-Za-z]+)', str(closing_date_str))
+            if match:
+                day, month_abbr = match.groups()
+                months = {
+                    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+                    'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+                }
+                month_num = months.get(month_abbr.lower()[:3])
+                if month_num:
+                    today = datetime.now()
+                    year = today.year
+                    try:
+                        test_date = datetime(year, int(month_num), int(day))
+                        if test_date < today:
+                            year += 1
+                        closing_date_str = f"{year}-{month_num}-{day.zfill(2)}"
+                    except ValueError:
+                        pass  # Invalid date, continue with other formats
+            
             # Try multiple date formats
-            formats = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d %B %Y']
+            formats = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d %B %Y', '%d %b %Y']
             for fmt in formats:
                 try:
                     closing = datetime.strptime(closing_date_str, fmt)
@@ -361,6 +478,47 @@ class BaseScraper:
             return 0
         except:
             return 0
+    
+    def parse_easytenders_date(self, raw_date_text):
+        """
+        Convert EasyTenders' 'Closing 18 Mar' format to ISO date.
+        Returns None if parsing fails.
+        """
+        if not raw_date_text:
+            return None
+        
+        import re
+        # Remove 'Closing:' prefix if present
+        clean_text = raw_date_text.replace('Closing:', '').strip()
+        
+        # Extract date parts using regex
+        match = re.search(r'(\d{1,2})\s+([A-Za-z]+)', clean_text)
+        if not match:
+            return clean_text  # Return original if pattern doesn't match
+        
+        day, month_abbr = match.groups()
+        
+        # Map month abbreviation to number
+        months = {
+            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+            'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+        }
+        month_num = months.get(month_abbr.lower()[:3])
+        
+        if not month_num:
+            return clean_text
+        
+        # Determine year (current or next)
+        today = datetime.now()
+        year = today.year
+        try:
+            test_date = datetime(year, int(month_num), int(day))
+            if test_date < today:
+                year += 1
+        except ValueError:
+            return clean_text
+        
+        return f"{year}-{month_num}-{day.zfill(2)}"  # Returns: 2026-03-18
 
 class ETendersScraper(BaseScraper):
     """Scraper for eTenders.gov.za using JSON API with GET request"""
