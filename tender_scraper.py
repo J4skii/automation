@@ -23,6 +23,7 @@ import logging
 import smtplib
 import requests
 import gspread
+import re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -288,17 +289,13 @@ class GoogleSheetsManager:
                     tender_data.get('category', ''),
                     tender_data.get('closing_date', ''),
                     tender_data.get('days_remaining', ''),
-                    tender_data.get('value_zar', ''),
                     tender_data.get('description', '')[:500],
                     tender_data.get('document_link', ''),
-                    tender_data.get('status', 'New'),
-                    'Yes' if tender_data.get('priority_buyer') else 'No',
-                    'No'
                 ]
                 rows.append(row)
             
-            # Use append_rows for batch operation
-            ws.append_rows(rows)
+            # Use append_rows for batch operation - USER_ENTERED preserves number formatting
+            ws.append_rows(rows, value_input_option='USER_ENTERED')
             logger.info(f"Batch added {len(rows)} tenders to Google Sheets")
             return True
             
@@ -442,42 +439,119 @@ class BaseScraper:
         
         return "uncategorized"
     
-    def calculate_days_remaining(self, closing_date_str):
-        """Calculate days until closing"""
-        try:
-            # Handle EasyTenders format: "Closing 18 Mar" or "18 Mar"
-            import re
-            match = re.search(r'(\d{1,2})\s+([A-Za-z]+)', str(closing_date_str))
-            if match:
-                day, month_abbr = match.groups()
-                months = {
-                    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
-                    'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
-                }
-                month_num = months.get(month_abbr.lower()[:3])
-                if month_num:
-                    today = datetime.now()
-                    year = today.year
-                    try:
-                        test_date = datetime(year, int(month_num), int(day))
-                        if test_date < today:
-                            year += 1
-                        closing_date_str = f"{year}-{month_num}-{day.zfill(2)}"
-                    except ValueError:
-                        pass  # Invalid date, continue with other formats
+    def calculate_days_remaining(self, closing_date_str, source=''):
+        """
+        Calculate days until closing from various date formats.
+        Returns integer (0 if expired or unparseable).
+        
+        Args:
+            closing_date_str: The date string to parse
+            source: Optional source name ('eTenders', 'EasyTenders', 'Transnet')
+        """
+        import re
+        
+        if not closing_date_str or str(closing_date_str).strip() in ['', 'N/A', 'TBD']:
+            return 0
+        
+        # Clean the input
+        cleaned = str(closing_date_str).strip()
+        
+        # Remove common prefixes
+        prefixes = ['closing ', 'closes ', 'close ', 'deadline ', 'due ', 'on ']
+        for prefix in prefixes:
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+        
+        closing_date = None
+        
+        # Source-specific parsing
+        if source == 'eTenders':
+            # eTenders: "2026-03-27" (ISO format)
+            try:
+                closing_date = datetime.strptime(cleaned, '%Y-%m-%d')
+            except ValueError:
+                pass
+        
+        elif source == 'EasyTenders':
+            # EasyTenders: "18 Mar 2026" or "18 Mar 2026 11:00AM"
+            patterns = [
+                r'(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})',  # 18 Mar 2026
+                r'(\d{1,2})/(\d{1,2})/(\d{4})',             # 18/03/2026
+                r'(\d{1,2})-(\d{1,2})-(\d{4})',             # 18-03-2026
+            ]
             
-            # Try multiple date formats
-            formats = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d %B %Y', '%d %b %Y']
+            for pattern in patterns:
+                match = re.search(pattern, cleaned)
+                if match:
+                    groups = match.groups()
+                    if len(groups) == 3:
+                        day, month_str, year = groups
+                        
+                        # Map month name/number
+                        month_map = {
+                            'jan': 1, 'january': 1,
+                            'feb': 2, 'february': 2,
+                            'mar': 3, 'march': 3,
+                            'apr': 4, 'april': 4,
+                            'may': 5,
+                            'jun': 6, 'june': 6,
+                            'jul': 7, 'july': 7,
+                            'aug': 8, 'august': 8,
+                            'sep': 9, 'september': 9,
+                            'oct': 10, 'october': 10,
+                            'nov': 11, 'november': 11,
+                            'dec': 12, 'december': 12
+                        }
+                        
+                        month = month_map.get(month_str.lower())
+                        if not month:
+                            try:
+                                month = int(month_str)
+                            except ValueError:
+                                continue
+                        
+                        try:
+                            closing_date = datetime(int(year), month, int(day))
+                            break
+                        except ValueError:
+                            continue
+        
+        # Fallback: try generic formats for any source
+        if not closing_date:
+            formats = [
+                '%Y-%m-%d',           # 2026-03-27
+                '%d/%m/%Y',           # 27/03/2026
+                '%d-%m-%Y',           # 27-03-2026
+                '%d %b %Y',           # 27 Mar 2026
+                '%d %B %Y',           # 27 March 2026
+                '%d %b',              # 27 Mar (current year)
+                '%d %B',              # 27 March (current year)
+            ]
+            
             for fmt in formats:
                 try:
-                    closing = datetime.strptime(closing_date_str, fmt)
-                    days = (closing - datetime.now()).days
-                    return max(0, days)
-                except:
+                    closing_date = datetime.strptime(cleaned, fmt)
+                    
+                    # If no year in format, assume current or next year
+                    if '%Y' not in fmt:
+                        today = datetime.now()
+                        closing_date = closing_date.replace(year=today.year)
+                        if closing_date < today.replace(hour=0, minute=0, second=0, microsecond=0):
+                            closing_date = closing_date.replace(year=today.year + 1)
+                    break
+                except ValueError:
                     continue
+        
+        # Calculate days remaining
+        if not closing_date:
+            logger.warning(f"Could not parse date '{closing_date_str}' (cleaned: '{cleaned}')")
             return 0
-        except:
-            return 0
+        
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        closing_date = closing_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        days = (closing_date - today).days
+        return max(0, days)
     
     def parse_easytenders_date(self, raw_date_text):
         """
@@ -609,7 +683,7 @@ class ETendersScraper(BaseScraper):
                         'buyer': item.get('organ_of_State', 'Unknown'),
                         'category': our_category,
                         'closing_date': closing_date,
-                        'days_remaining': self.calculate_days_remaining(closing_date),
+                        'days_remaining': self.calculate_days_remaining(closing_date, 'eTenders'),
                         'value_zar': 0,
                         'description': title,
                         'document_link': f"{self.base_url}/Home/TenderDetails?id={item.get('id', '')}",
@@ -686,7 +760,7 @@ class EasyTendersScraper(BaseScraper):
                                     'buyer': buyer,
                                     'category': category_actual,
                                     'closing_date': closing,
-                                    'days_remaining': self.calculate_days_remaining(closing),
+                                    'days_remaining': self.calculate_days_remaining(closing, 'EasyTenders'),
                                     'value_zar': 0,
                                     'description': title,
                                     'document_link': self.base_url + link if link.startswith('/') else link,
@@ -774,7 +848,7 @@ class TransnetScraper(BaseScraper):
                             'buyer': buyer,
                             'category': category,
                             'closing_date': closing,
-                            'days_remaining': self.calculate_days_remaining(closing),
+                            'days_remaining': self.calculate_days_remaining(closing, 'Transnet'),
                             'value_zar': 0,
                             'description': title,
                             'document_link': f"{self.base_url}{cols[1].find('a')['href'] if cols[1].find('a') and cols[1].find('a').has_attr('href') else ''}",
